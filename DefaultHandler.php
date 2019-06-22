@@ -1,6 +1,6 @@
 <?php
 
-namespace Webslon\Library\Api\Service\HandlerException;
+namespace App\Library\Api\Service\HandlerException;
 
 use ...;
 
