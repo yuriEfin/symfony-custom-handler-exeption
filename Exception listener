@@ -1,0 +1,275 @@
+<?php
+
+namespace App\Library\Api\Service;
+
+use ...;
+
+/**
+ * Class ExceptionListener
+ * Class mediator for handlers exception
+ */
+class ExceptionListener implements DefaultListenerExceptionInterface
+{
+    const ENV_PROD = 'prod';
+    const ENV_DEV = 'dev';
+    const ENV_STAGE = 'stage';
+    const ENV_TEST = 'test';
+
+    /**
+     * Use default error handlers
+     * @var bool
+     */
+    public $isUseDefaultHandler = true;
+    /**
+     * @var ApiResponse
+     */
+    private $response;
+
+    /**
+     * @var ApiResponseInterface
+     */
+    private $dirtyResponse;
+
+    /**
+     * @var LoggerInterface
+     */
+    private $logger;
+
+    /**
+     * @var string
+     */
+    private $basePath;
+
+    /**
+     * @var GetResponseForExceptionEvent
+     */
+    private $event;
+    /**
+     * @var \Throwable
+     */
+    private $exception;
+
+    /**
+     * @var string
+     */
+    private $requestId;
+    /**
+     * @var string
+     */
+    private $env;
+    /**
+     * @var array
+     */
+    private $handlers = [];
+    /**
+     * @var HandlerErrorInterface
+     */
+    private $handler;
+    /**
+     * @var TranslatorInterface
+     */
+    private $translator;
+
+    /**
+     * ExceptionListener constructor.
+     *
+     * @param ApiResponse         $response
+     * @param LoggerInterface     $logger
+     * @param string              $basePath
+     * @param string              $env
+     * @param TranslatorInterface $translator
+     */
+    public function __construct(
+        ApiResponse $response,
+        LoggerInterface $logger,
+        string $basePath,
+        string $env,
+        TranslatorInterface $translator
+    )
+    {
+        $this->response = $response;
+        $this->logger = $logger;
+        $this->basePath = $basePath;
+        $this->env = $env;
+        $this->translator = $translator;
+    }
+
+    /**
+     * @param GetResponseForExceptionEvent $event
+     *
+     * @throws \ReflectionException
+     */
+    public function onKernelException(GetResponseForExceptionEvent $event): void
+    {
+        $this->event = $event;
+        if (!strpos($this->event->getRequest()->getPathInfo(), $this->basePath) === 0) {
+            return;
+        }
+        $this->requestId = $this->event->getRequest()->headers->get('X-Request-Id', '');
+        $this->exception = $this->event->getException();
+        $response = [];
+        /** @var HandlerErrorInterface $handler */
+        foreach ($this->getHandlers() as $handler) {
+            if (!$handler->supportException()) {
+                continue;
+            }
+
+            $this->handler = $handler;
+            $response = $this->handler->handle()->send();
+
+            break;
+        }
+        // Logged real exception
+        $ex = $this->event->getException();
+        $this->getLogger()->error($ex, array_merge($this->getContext(), ['exception' => $ex]));
+
+        $class = new \ReflectionClass(Response::class);
+        $response->setStatusCode(!in_array($this->handler->getStatusCode(), $class->getConstants()) ? Response::HTTP_INTERNAL_SERVER_ERROR : $this->handler->getStatusCode());
+        if ($headers = $this->handler->getHeaders()) {
+            $response->headers->replace($headers);
+        }
+        $this->event->setResponse($response);
+    }
+
+    /**
+     * @return array
+     */
+    public function getContext()
+    {
+        $context = [];
+        if ($this->requestId) {
+            $context = [
+                'tags' => [
+                    'Request-Id' => $this->requestId,
+                ],
+            ];
+        }
+
+        return $context;
+    }
+
+    /**
+     * @return array
+     */
+    public function getHandlers()
+    {
+        if (!$this->handlers) {
+            $this->handlers = $this->getDefaultHandlers();
+        }
+
+        return $this->handlers;
+    }
+
+    /**
+     * for configure
+     *
+     * @param array $handlers
+     *
+     * @return mixed|void
+     */
+    public function setHandlers(array $handlers)
+    {
+        $this->handlers = $handlers;
+    }
+
+    /**
+     * @param array $handlers
+     */
+    public function addHandlers(array $handlers): void
+    {
+        $addHandler = [];
+        foreach ($handlers as $handler) {
+            $addHandler[] = new $handler($this);
+        }
+        $this->handlers = array_merge($this->handlers, $addHandler);
+    }
+
+    /**
+     * @return array
+     */
+    public function getDefaultHandlers(): array
+    {
+        return [
+            new ValidationHandler($this),
+            new EnumExceptionHandler($this),
+            new ORMExceptionHandler($this),
+            new ValidationErrorHandler($this),
+            new UniqueConstraintViolationExceptionHandler($this),
+            new DriverExceptionHandler($this),
+            new AuthenticationCredentialsNotFoundExceptionHandler($this),
+            new InsufficientAuthenticationExceptionHandler($this),
+            new AuthenticationErrorHandler($this),
+            new DenormalizeExceptionHandler($this),
+            new ValidationAndNormalizationExceptionHandler($this),
+            new NormalizableValueExceptionHandler($this),
+            new HttpExceptionHandler($this),
+            new InvalidArgumentExceptionHandler($this),
+            new DefaultHandler($this),
+        ];
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getException()
+    {
+        return $this->exception;
+    }
+
+    /**
+     * @return string
+     */
+    public function getRequestId()
+    {
+        return $this->requestId;
+    }
+
+    /**
+     * @param ApiResponseInterface $response
+     *
+     * @return void
+     */
+    public function addDirtyResponse(ApiResponseInterface $response)
+    {
+        $this->dirtyResponse = $response;
+    }
+
+    /**
+     * @return ApiResponse
+     */
+    public function getResponse()
+    {
+        return $this->response;
+    }
+
+    /**
+     * @return TranslatorInterface
+     */
+    public function getTranslator()
+    {
+        return $this->translator;
+    }
+
+    /**
+     * @return LoggerInterface
+     */
+    public function getLogger()
+    {
+        return $this->logger;
+    }
+
+    public function isProd()
+    {
+        return $this->env == self::ENV_PROD;
+    }
+
+    public function isDev()
+    {
+        return in_array($this->env, [self::ENV_DEV, self::ENV_STAGE, 'local']);
+    }
+
+    public function isTest()
+    {
+        return $this->env == self::ENV_TEST;
+    }
+}
